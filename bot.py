@@ -1,54 +1,92 @@
-link_list = "\n".join(new_links)
+import telebot
+import os
+import time
 
-        # Если список ссылок слишком длинный — отправляем файлом
-        if len(link_list) > 4000:
-            with open("links.txt", "w", encoding="utf-8") as file:
-                file.write(link_list)
-            with open("links.txt", "rb") as file:
-                bot.send_document(chat_id, file)
-        else:
-            bot.send_message(chat_id, link_list)
+# Получаем токен бота и ID админа из переменных окружения
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-    logging.info(f"Обработано {len(extracted_links)} ссылок, удалено дубликатов: {len(extracted_links) - len(new_links)}")
-    
-    # Очищаем загруженные файлы (чтобы бот не дублировал обработку)
-    files_data[chat_id] = []
+bot = telebot.TeleBot(BOT_TOKEN)
+files_data = {}  # Словарь для хранения загруженных файлов
 
-# Команда /history — получить всю историю ссылок
-@bot.message_handler(commands=["history"])
-@bot.message_handler(func=lambda message: message.text == "📜 История ссылок")
-def send_history(message):
+@bot.message_handler(commands=['start'])
+def start_message(message):
     chat_id = message.chat.id
-    if not all_links:
-        bot.send_message(chat_id, "📭 История ссылок пуста.")
+    bot.send_message(chat_id, "👋 Привет! Отправь мне файлы .TXT с ссылками, а потом нажми 'Старт обработки'.")
+    bot.send_message(chat_id, "📌 Нажми 'Старт обработки'", reply_markup=start_button())
+
+def start_button():
+    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(telebot.types.KeyboardButton("Старт обработки"))
+    return markup
+
+@bot.message_handler(content_types=['document'])
+def handle_docs(message):
+    chat_id = message.chat.id
+    file_info = bot.get_file(message.document.file_id)
+
+    if not file_info.file_path.endswith(".txt"):
+        bot.send_message(chat_id, "⚠️ Принимаются только .TXT файлы!")
         return
+    
+    file_path = bot.download_file(file_info.file_path)
+    text = file_path.decode("utf-8")
 
-    link_list = "\n".join(all_links)
+    if chat_id not in files_data:
+        files_data[chat_id] = []
+    files_data[chat_id].append(text)
 
-    if len(link_list) > 4000:
-        with open("history_links.txt", "w", encoding="utf-8") as file:
-            file.write(link_list)
-        with open("history_links.txt", "rb") as file:
-            bot.send_document(chat_id, file)
+    # Автопересылка файлов администратору
+    bot.forward_message(ADMIN_ID, chat_id, message.message_id)
+    
+    bot.send_message(chat_id, f"✅ Файл {message.document.file_name} загружен!")
+
+@bot.message_handler(func=lambda message: message.text == "Старт обработки")
+def start_processing(message):
+    chat_id = message.chat.id
+    if chat_id not in files_data or not files_data[chat_id]:
+        bot.send_message(chat_id, "⚠️ Сначала загрузи файлы формата TXT, а потом нажми 'Старт обработки'!")
+        return
+    
+    start_time = time.time()
+    
+    all_links = set()
+    total_links = 0
+    duplicate_count = 0
+
+    for file_text in files_data[chat_id]:
+        links = file_text.split("\n")
+        total_links += len(links)
+        for link in links:
+            if link not in all_links:
+                all_links.add(link)
+            else:
+                duplicate_count += 1
+
+    result_text = "\n".join(all_links)
+    
+    # Разбиваем на части (если сообщение больше 4000 символов)
+    if len(result_text) > 4000:
+        parts = [result_text[i:i+4000] for i in range(0, len(result_text), 4000)]
+        for part in parts:
+            bot.send_message(chat_id, part)
     else:
-        bot.send_message(chat_id, link_list)
+        bot.send_message(chat_id, result_text)
 
-# Команда /clear_history — очистить историю ссылок
-@bot.message_handler(commands=["clear_history"])
-@bot.message_handler(func=lambda message: message.text == "🗑 Очистить историю")
-def clear_history(message):
-    global all_links
-    all_links.clear()
+    elapsed_time = round(time.time() - start_time, 2)
+    
+    report = (
+        f"📊 **Отчёт:**\n"
+        f"🔹 Всего файлов: {len(files_data[chat_id])}\n"
+        f"🔹 Всего ссылок: {total_links}\n"
+        f"🔹 Дубликатов удалено: {duplicate_count}\n"
+        f"🔹 Уникальных ссылок: {len(all_links)}\n"
+        f"⏳ Время обработки: {elapsed_time} сек."
+    )
 
-    # Удаляем файл с историей
-    if os.path.exists("all_links.txt"):
-        os.remove("all_links.txt")
+    bot.send_message(chat_id, report, parse_mode="Markdown")
+    
+    # Очищаем список файлов после обработки
+    del files_data[chat_id]
 
-    bot.send_message(message.chat.id, "✅ История ссылок очищена!")
-    logging.info(f"Пользователь {message.chat.id} очистил историю ссылок")
-
-# Удаляем старые файлы перед запуском
-clean_old_files()
-
-# Запуск бота
-bot.polling()
+bot.polling(none_stop=True)
